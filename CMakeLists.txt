@@ -15,6 +15,13 @@ FetchContent_Declare(
     GIT_TAG 0.2.2)
 FetchContent_MakeAvailable(preloader_android)
 
+# Full mod
 add_library(flarial_gui SHARED src/main.cpp)
 target_include_directories(flarial_gui PRIVATE src)
 target_link_libraries(flarial_gui PRIVATE preloader log)
+
+# Minimal twin: same file, but enable() does nothing
+add_library(flarial_min SHARED src/main.cpp)
+target_compile_definitions(flarial_min PRIVATE FG_MINIMAL=1)
+target_include_directories(flarial_min PRIVATE src)
+target_link_libraries(flarial_min PRIVATE preloader log)
