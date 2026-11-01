@@ -1,13 +1,14 @@
-// Flarial-style ClickGUI for LeviLauncher (LeviLaunchroid) - GUI skeleton.
-// Home: [Mods] [pen] / [Cosmetics]. Mods + Cosmetics are empty for now.
-// Pen = HUD edit mode (move + resize a sample HUD box).
+// Flarial-style ClickGUI for LeviLauncher (LeviLaunchroid).
+// - Round Flarial-style shortcut on screen (tap = open GUI, drag = move anywhere).
+// - Home: [Mods] [pen] / [Cosmetics]. Mods + Cosmetics are empty for now.
+// - Pen = HUD edit mode (move + resize a sample HUD box).
 #include <pl/Input.hpp>
 #include <pl/Logger.hpp>
 #include <pl/Mod.hpp>
 #include <pl/ModMenu.hpp>
 
 #include <algorithm>
-#include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <span>
 #include <string>
@@ -18,11 +19,13 @@
 
 namespace {
 
-// CALIBRATE: screen size in the same units as touch events + draw commands.
+// Infinix Note 40 = 1080x2436 (landscape 2436x1080).
+// If positions are off on another phone, change these two numbers.
 constexpr float kScreenW = 2436.0f;
 constexpr float kScreenH = 1080.0f;
 constexpr const char *kModuleId = "flarial_gui.main";
-constexpr const char *kButtonId = "flarial_gui.open";
+constexpr const char *kShortcutId = "flarial_gui.shortcut";
+constexpr int kShortcutPx = 160;
 
 struct Rect {
     float x, y, w, h;
@@ -39,6 +42,49 @@ const AssetInfo *findAsset(const char *name) {
     return nullptr;
 }
 
+// ---- Flarial-style round logo (black circle + two red shapes), drawn in code
+struct Pt { float x, y; };
+
+bool inPoly(const Pt *p, int n, float x, float y) {
+    bool in = false;
+    for (int i = 0, j = n - 1; i < n; j = i++)
+        if (((p[i].y > y) != (p[j].y > y)) &&
+            (x < (p[j].x - p[i].x) * (y - p[i].y) / (p[j].y - p[i].y) + p[i].x))
+            in = !in;
+    return in;
+}
+
+std::vector<unsigned char> makeShortcutRgba(int n) {
+    static const Pt kLight[] = {{-0.1273f, -0.3727f}, {0.4182f, -0.3727f}, {0.2909f, -0.1227f}, {0.0045f, -0.1227f}};
+    static const Pt kDark[] = {{-0.2864f, -0.0682f}, {0.0227f, -0.1136f}, {0.1364f, 0.1227f},
+                               {-0.1273f, 0.1318f}, {-0.2682f, 0.3682f}, {-0.4182f, 0.1227f}};
+    std::vector<unsigned char> px(static_cast<size_t>(n) * n * 4, 0);
+    const float half = n * 0.5f;
+    const int ss = 4;
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            float a = 0, r = 0, g = 0, b = 0;
+            for (int sy = 0; sy < ss; ++sy)
+                for (int sx = 0; sx < ss; ++sx) {
+                    float fx = (x + (sx + 0.5f) / ss - half) / half;
+                    float fy = (y + (sy + 0.5f) / ss - half) / half;
+                    if (fx * fx + fy * fy > 1.0f) continue;
+                    a += 1;
+                    if (inPoly(kLight, 4, fx, fy)) { r += 255; g += 64; b += 64; }
+                    else if (inPoly(kDark, 6, fx, fy)) { r += 193; g += 58; b += 62; }
+                    else { r += 12; g += 16; b += 19; }
+                }
+            if (a > 0) {
+                size_t i = (static_cast<size_t>(y) * n + x) * 4;
+                px[i] = static_cast<unsigned char>(r / a);
+                px[i + 1] = static_cast<unsigned char>(g / a);
+                px[i + 2] = static_cast<unsigned char>(b / a);
+                px[i + 3] = static_cast<unsigned char>(255.0f * a / (ss * ss));
+            }
+        }
+    return px;
+}
+
 class Gui {
 public:
     static Gui &get() {
@@ -48,36 +94,73 @@ public:
 
     void setActive(bool v) {
         mActive = v;
-        if (!v) close();
+        mScreen = Screen::Closed;
+        mDrag = Drag::None;
+        mScDrag = false;
+        mPointer = -1;
+        render();
     }
-
-    void toggle() {
-        using namespace std::chrono;
-        auto now = steady_clock::now();
-        if (duration_cast<milliseconds>(now - mLastToggle).count() < 350) return; // debounce
-        mLastToggle = now;
-        if (mScreen == Screen::Closed) go(Screen::Home);
-        else close();
-    }
-
-    void close() { go(Screen::Closed); }
 
     bool onTouch(const pl::input::TouchEvent &e) {
-        if (!mActive || mScreen == Screen::Closed) return false;
-        const int act = e.action & 0xFF; // Android MotionEvent: 0 down, 1 up, 2 move, 3 cancel
-        if (act == 0 || act == 5) {
+        if (!mActive) return false;
+        // Android MotionEvent: 0 down, 1 up, 2 move, 3 cancel, 5/6 pointer down/up
+        const int act = e.action & 0xFF;
+        const bool isDown = (act == 0 || act == 5);
+        const bool isUp = (act == 1 || act == 3 || act == 6);
+        const bool isMove = (act == 2);
+
+        if (mScreen == Screen::Closed) {
+            // Shortcut: tap = open, drag = move. Everything else passes through to the game.
+            if (isDown && mPointer == -1 && mSc.hit(e.x, e.y)) {
+                mPointer = e.pointerId;
+                mScDrag = true;
+                mScMoved = false;
+                mStartX = e.x; mStartY = e.y;
+                mScStart = mSc;
+                return true;
+            }
+            if (e.pointerId == mPointer) {
+                if (mScDrag) {
+                    if (isMove) {
+                        float dx = e.x - mStartX, dy = e.y - mStartY;
+                        float th = 16.0f * s();
+                        if (!mScMoved && dx * dx + dy * dy > th * th) mScMoved = true;
+                        if (mScMoved) {
+                            mSc.x = std::clamp(mScStart.x + dx, 0.0f, kScreenW - mSc.w);
+                            mSc.y = std::clamp(mScStart.y + dy, 0.0f, kScreenH - mSc.h);
+                            render();
+                        }
+                    } else if (isUp) {
+                        bool tap = !mScMoved;
+                        mScDrag = false;
+                        mPointer = -1;
+                        if (tap) go(Screen::Home);
+                    }
+                    return true;
+                }
+                if (isUp) { // release of the touch that just closed the GUI
+                    mPointer = -1;
+                    mDrag = Drag::None;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // GUI open: swallow all touches
+        if (isDown) {
             if (mPointer == -1) {
                 mPointer = e.pointerId;
                 onDown(e.x, e.y);
             }
         } else if (e.pointerId == mPointer) {
-            if (act == 2) onMove(e.x, e.y);
-            else if (act == 1 || act == 3 || act == 6) {
+            if (isMove) onMove(e.x, e.y);
+            else if (isUp) {
                 mPointer = -1;
                 mDrag = Drag::None;
             }
         }
-        return true; // swallow touches while the GUI is open
+        return true;
     }
 
 private:
@@ -116,7 +199,7 @@ private:
             if (modsBtn().hit(x, y)) go(Screen::Mods);
             else if (penBtn().hit(x, y)) go(Screen::EditHud);
             else if (cosBtn().hit(x, y)) go(Screen::Cosmetics);
-            else if (!cluster().hit(x, y)) close();
+            else if (!cluster().hit(x, y)) go(Screen::Closed);
             break;
         case Screen::Mods:
         case Screen::Cosmetics:
@@ -152,39 +235,47 @@ private:
     }
 
     // ---- drawing (Image draw commands only: every widget is a pre-rendered image)
+    void addId(std::vector<pl::modmenu::DrawCommand> &v, const char *imageId, const Rect &r) {
+        v.push_back({
+            .type = pl::modmenu::DrawCommandType::Image,
+            .x = r.x, .y = r.y, .w = r.w, .h = r.h,
+            .imageId = imageId,
+        });
+    }
+
     void add(std::vector<pl::modmenu::DrawCommand> &v, const char *asset, const Rect &r) {
-        if (const AssetInfo *a = findAsset(asset))
-            v.push_back({
-                .type = pl::modmenu::DrawCommandType::Image,
-                .x = r.x, .y = r.y, .w = r.w, .h = r.h,
-                .imageId = a->id,
-            });
+        if (const AssetInfo *a = findAsset(asset)) addId(v, a->id, r);
     }
 
     void render() {
         std::vector<pl::modmenu::DrawCommand> v;
-        if (mScreen != Screen::Closed) {
-            add(v, "dim", {0, 0, kScreenW, kScreenH});
+        if (mActive) {
             switch (mScreen) {
+            case Screen::Closed:
+                addId(v, kShortcutId, mSc);
+                break;
             case Screen::Home:
+                add(v, "dim", {0, 0, kScreenW, kScreenH});
                 add(v, "btn_mods", modsBtn());
                 add(v, "btn_pen", penBtn());
                 add(v, "btn_cosmetics", cosBtn());
                 break;
             case Screen::Mods:
+                add(v, "dim", {0, 0, kScreenW, kScreenH});
                 add(v, "panel_mods", panel());
                 add(v, "btn_back", backBtn());
                 break;
             case Screen::Cosmetics:
+                add(v, "dim", {0, 0, kScreenW, kScreenH});
                 add(v, "panel_cosmetics", panel());
                 add(v, "btn_back", backBtn());
                 break;
             case Screen::EditHud:
+                add(v, "dim", {0, 0, kScreenW, kScreenH});
                 add(v, "hud_box", mHud);
                 add(v, "btn_reset", resetBtn());
                 add(v, "btn_done", doneBtn());
                 break;
-            default: break;
             }
         }
         pl::modmenu::submitDrawCommands(kModuleId, v);
@@ -193,10 +284,13 @@ private:
     bool mActive = false;
     Screen mScreen = Screen::Closed;
     Rect mHud{0, 0, 0, 0}, mStart{0, 0, 0, 0};
+    // Default shortcut spot: right of the crosshair, like Flarial. Drag to move.
+    Rect mSc{kScreenW * 0.59f, kScreenH * 0.595f, 110.0f * kScreenH / 1080.0f, 110.0f * kScreenH / 1080.0f};
+    Rect mScStart{0, 0, 0, 0};
     Drag mDrag = Drag::None;
+    bool mScDrag = false, mScMoved = false;
     float mStartX = 0, mStartY = 0;
     int mPointer = -1;
-    std::chrono::steady_clock::time_point mLastToggle{};
 };
 
 } // namespace
@@ -222,21 +316,17 @@ public:
             if (!pl::modmenu::registerImage(a.id, std::span<const unsigned char>(a.data, a.size), a.w, a.h))
                 getSelf().getLogger().warn("registerImage failed: {}", a.id);
         }
+        static const std::vector<unsigned char> shortcutPx = makeShortcutRgba(kShortcutPx);
+        if (!pl::modmenu::registerImage(kShortcutId, std::span<const unsigned char>(shortcutPx.data(), shortcutPx.size()),
+                                        kShortcutPx, kShortcutPx))
+            getSelf().getLogger().warn("registerImage failed: shortcut");
 
         bool ok = pl::modmenu::ModuleBuilder(kModuleId, "Flarial GUI")
                       .modId(getSelf().getId())
-                      .description("Flarial-style ClickGUI (Mods, Cosmetics, HUD editor).")
+                      .description("Flarial-style shortcut + ClickGUI (Mods, Cosmetics, HUD editor).")
                       .defaultEnabled(true)
+                      .onToggle([](std::string_view, bool enabled) { Gui::get().setActive(enabled); })
                       .registerModule();
-
-        ok = pl::modmenu::ButtonBuilder(kButtonId, "Open ClickGUI")
-                 .modId(getSelf().getId())
-                 .moduleId(kModuleId)
-                 .label("F")
-                 .androidKeyCode(0)
-                 .behavior(pl::modmenu::ButtonBehavior::Click)
-                 .onEvent([](std::string_view, pl::modmenu::ButtonEvent, float) { Gui::get().toggle(); })
-                 .registerButton() && ok;
 
         // No unregister API for touch callbacks: register once, gate with setActive().
         static bool touchRegistered = false;
@@ -251,7 +341,6 @@ public:
 
     bool disable() {
         Gui::get().setActive(false);
-        pl::modmenu::unregisterButton(kButtonId);
         pl::modmenu::unregisterModule(kModuleId);
         return true;
     }
