@@ -33,15 +33,18 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=$NDK_PATH/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-28 \
-            -DANDROID_STL=c++_shared
+            -DANDROID_STL=c++_static
       - name: Build
         run: cmake --build build -j
       - name: Package
         run: |
-          mkdir -p dist/flarial_gui
+          mkdir -p dist/flarial_gui dist/flarial_min
           cp build/libflarial_gui.so dist/flarial_gui/
           cp manifest.json dist/flarial_gui/
+          cp build/libflarial_min.so dist/flarial_min/
+          sed -e 's/Flarial GUI/Flarial MIN/' -e 's/libflarial_gui.so/libflarial_min.so/' manifest.json > dist/flarial_min/manifest.json
           (cd dist/flarial_gui && zip -r ../flarial_gui.levipack .)
+          (cd dist/flarial_min && zip -r ../flarial_min.levipack .)
       - uses: actions/upload-artifact@v4
         with:
           name: flarial_gui
