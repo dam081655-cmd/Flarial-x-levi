@@ -1,0 +1,10 @@
+{
+  "type": "preload-native",
+  "name": "Flarial GUI",
+  "author": "bro",
+  "version": "0.1.0",
+  "entry": "libflarial_gui.so",
+  "minecraft_versions": [],
+  "overwrite_files": [],
+  "overwrite_folders": []
+}
