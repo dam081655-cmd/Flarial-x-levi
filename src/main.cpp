@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <cstring>
 #include <span>
 #include <string>
@@ -28,7 +27,6 @@ constexpr float kScreenH = 1080.0f;
 constexpr const char *kModuleId = "flarial_gui.main";
 constexpr const char *kShortcutId = "flarial_gui.shortcut";
 constexpr const char *kButtonId = "flarial_gui.open";
-constexpr int kIconPx = 128;
 constexpr int kShortcutPx = 160;
 // CALIBRATION BUILD: draws a marker ruler + a dot under your finger.
 constexpr bool kDebug = true;
@@ -95,87 +93,6 @@ std::vector<unsigned char> makeShortcutRgba(int n) {
 }
 
 
-// ---- tiny PNG writer (stored deflate blocks, no zlib) for the floating-button icon
-uint32_t crc32Of(const unsigned char *d, size_t n) {
-    static uint32_t table[256];
-    static bool init = false;
-    if (!init) {
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : (c >> 1);
-            table[i] = c;
-        }
-        init = true;
-    }
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 0; i < n; ++i) crc = table[(crc ^ d[i]) & 0xFF] ^ (crc >> 8);
-    return crc ^ 0xFFFFFFFFu;
-}
-
-void putBE32(std::vector<unsigned char> &v, uint32_t x) {
-    v.push_back(static_cast<unsigned char>(x >> 24));
-    v.push_back(static_cast<unsigned char>(x >> 16));
-    v.push_back(static_cast<unsigned char>(x >> 8));
-    v.push_back(static_cast<unsigned char>(x));
-}
-
-void pngChunk(std::vector<unsigned char> &out, const char *type, const std::vector<unsigned char> &data) {
-    putBE32(out, static_cast<uint32_t>(data.size()));
-    std::vector<unsigned char> body(type, type + 4);
-    body.insert(body.end(), data.begin(), data.end());
-    out.insert(out.end(), body.begin(), body.end());
-    putBE32(out, crc32Of(body.data(), body.size()));
-}
-
-std::vector<unsigned char> encodePng(const std::vector<unsigned char> &rgba, int w, int h) {
-    std::vector<unsigned char> raw;
-    raw.reserve(static_cast<size_t>(w * 4 + 1) * h);
-    for (int y = 0; y < h; ++y) {
-        raw.push_back(0);
-        raw.insert(raw.end(), rgba.begin() + static_cast<size_t>(y) * w * 4, rgba.begin() + static_cast<size_t>(y + 1) * w * 4);
-    }
-    std::vector<unsigned char> z{0x78, 0x01};
-    size_t pos = 0;
-    while (pos < raw.size()) {
-        size_t n = std::min<size_t>(65535, raw.size() - pos);
-        bool last = (pos + n == raw.size());
-        z.push_back(last ? 1 : 0);
-        z.push_back(static_cast<unsigned char>(n & 0xFF));
-        z.push_back(static_cast<unsigned char>(n >> 8));
-        z.push_back(static_cast<unsigned char>(~n & 0xFF));
-        z.push_back(static_cast<unsigned char>((~n >> 8) & 0xFF));
-        z.insert(z.end(), raw.begin() + pos, raw.begin() + pos + n);
-        pos += n;
-    }
-    uint32_t a = 1, b = 0;
-    for (unsigned char c : raw) { a = (a + c) % 65521u; b = (b + a) % 65521u; }
-    putBE32(z, (b << 16) | a);
-
-    std::vector<unsigned char> png{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-    std::vector<unsigned char> ihdr;
-    putBE32(ihdr, static_cast<uint32_t>(w));
-    putBE32(ihdr, static_cast<uint32_t>(h));
-    ihdr.insert(ihdr.end(), {8, 6, 0, 0, 0});
-    pngChunk(png, "IHDR", ihdr);
-    pngChunk(png, "IDAT", z);
-    pngChunk(png, "IEND", {});
-    return png;
-}
-
-// Set the button icon with whatever signature this SDK version has (PNG bytes).
-template <class B>
-decltype(auto) withPngIcon(B &&b, const std::vector<unsigned char> &png) {
-    if constexpr (requires { std::forward<B>(b).pngIcon(std::span<const unsigned char>(png)); }) {
-        return std::forward<B>(b).pngIcon(std::span<const unsigned char>(png));
-    } else if constexpr (requires { std::forward<B>(b).pngIcon(png); }) {
-        return std::forward<B>(b).pngIcon(png);
-    } else if constexpr (requires { std::forward<B>(b).pngIcon(png.data(), png.size()); }) {
-        return std::forward<B>(b).pngIcon(png.data(), png.size());
-    } else {
-        return std::forward<B>(b); // icon API differs: button still works, default icon
-    }
-}
-
 std::vector<unsigned char> makeSolid(int n, unsigned char r, unsigned char g, unsigned char b) {
     std::vector<unsigned char> px(static_cast<size_t>(n) * n * 4);
     for (size_t i = 0; i < px.size(); i += 4) {
@@ -218,7 +135,7 @@ public:
         const bool isUp = (act == 1 || act == 3 || act == 6);
         const bool isMove = (act == 2);
 
-        if (kDebug && mScreen == Screen::Closed && (isDown || isMove)) {
+        if (kDebug && mScreen == Screen::Closed && isDown) {
             mTouchX = e.x; mTouchY = e.y; mTouchSeen = true;
             render();
         }
@@ -463,16 +380,14 @@ public:
                       .onToggle([](std::string_view, bool enabled) { Gui::get().setActive(enabled); })
                       .registerModule();
 
-        // Floating Flarial button (Levi HUD button) with the round logo as icon.
-        static const std::vector<unsigned char> iconPng = encodePng(makeShortcutRgba(kIconPx), kIconPx, kIconPx);
-        ok = withPngIcon(pl::modmenu::ButtonBuilder(kButtonId, "Flarial")
-                             .modId(getSelf().getId())
-                             .moduleId(kModuleId)
-                             .label("F")
-                             .androidKeyCode(0)
-                             .behavior(pl::modmenu::ButtonBehavior::Click)
-                             .onEvent([](std::string_view, pl::modmenu::ButtonEvent, float) { Gui::get().toggle(); }),
-                         iconPng)
+        // Floating Flarial button (Levi HUD button). Same API calls as the first working build.
+        ok = pl::modmenu::ButtonBuilder(kButtonId, "Flarial")
+                 .modId(getSelf().getId())
+                 .moduleId(kModuleId)
+                 .label("F")
+                 .androidKeyCode(0)
+                 .behavior(pl::modmenu::ButtonBehavior::Click)
+                 .onEvent([](std::string_view, pl::modmenu::ButtonEvent, float) { Gui::get().toggle(); })
                  .registerButton() && ok;
 
         // No unregister API for touch callbacks: register once, gate with setActive().
