@@ -12,39 +12,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build fonts-dejavu-core zip
           pip install pillow
-      - name: Pick an older NDK (r30 libc++ needs symbols that Minecraft's libc++ lacks)
+      - name: Generate button art
+        run: python3 tools/gen_assets.py
+      - name: Build with several NDK versions
         run: |
           NDK_ROOT=/usr/local/lib/android/sdk/ndk
           ls "$NDK_ROOT"
-          PICK=""
-          for v in 27 28 26 25; do
-            c=$(ls -d "$NDK_ROOT"/$v.* 2>/dev/null | sort -V | tail -1)
-            if [ -n "$c" ]; then PICK="$c"; break; fi
+          mkdir -p dist
+          for v in 28 29 30; do
+            NDK=$(ls -d "$NDK_ROOT"/$v.* 2>/dev/null | sort -V | tail -1)
+            if [ -z "$NDK" ]; then echo "NDK $v not installed, skipping"; continue; fi
+            echo "=== NDK $v: $NDK"
+            cmake -S . -B build_$v -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+              -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
+              -DANDROID_STL=c++_shared || continue
+            cmake --build build_$v --target flarial_gui -j || continue
+            d=dist/flarial_ndk$v
+            mkdir -p $d
+            cp build_$v/libflarial_gui.so $d/
+            sed -e "s/Flarial GUI/Flarial NDK$v/" manifest.json > $d/manifest.json
+            (cd $d && zip -r ../flarial_ndk$v.levipack .)
           done
-          if [ -z "$PICK" ]; then PICK="$ANDROID_NDK_HOME"; fi
-          echo "Using NDK: $PICK"
-          echo "NDK_PATH=$PICK" >> "$GITHUB_ENV"
-      - name: Generate button art
-        run: python3 tools/gen_assets.py
-      - name: Configure
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=$NDK_PATH/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-28 \
-            -DANDROID_STL=c++_static
-      - name: Build
-        run: cmake --build build -j
-      - name: Package
-        run: |
-          mkdir -p dist/flarial_gui dist/flarial_min
-          cp build/libflarial_gui.so dist/flarial_gui/
-          cp manifest.json dist/flarial_gui/
-          cp build/libflarial_min.so dist/flarial_min/
-          sed -e 's/Flarial GUI/Flarial MIN/' -e 's/libflarial_gui.so/libflarial_min.so/' manifest.json > dist/flarial_min/manifest.json
-          (cd dist/flarial_gui && zip -r ../flarial_gui.levipack .)
-          (cd dist/flarial_min && zip -r ../flarial_min.levipack .)
+          ls dist
+          test -n "$(ls dist/*.levipack 2>/dev/null)"
       - uses: actions/upload-artifact@v4
         with:
           name: flarial_gui
