@@ -355,6 +355,9 @@ public:
     }
 
     bool enable() {
+        #ifdef FG_MINIMAL
+        return true;
+#endif
         for (const auto &a : kAssets) {
             if (!pl::modmenu::registerImage(a.id, std::span<const unsigned char>(a.data, a.size), a.w, a.h))
                 getSelf().getLogger().warn("registerImage failed: {}", a.id);
