@@ -12,13 +12,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build fonts-dejavu-core zip
           pip install pillow
+      - name: Pick an older NDK (r30 libc++ needs symbols that Minecraft's libc++ lacks)
+        run: |
+          NDK_ROOT=/usr/local/lib/android/sdk/ndk
+          ls "$NDK_ROOT"
+          PICK=""
+          for v in 27 28 26 25; do
+            c=$(ls -d "$NDK_ROOT"/$v.* 2>/dev/null | sort -V | tail -1)
+            if [ -n "$c" ]; then PICK="$c"; break; fi
+          done
+          if [ -z "$PICK" ]; then PICK="$ANDROID_NDK_HOME"; fi
+          echo "Using NDK: $PICK"
+          echo "NDK_PATH=$PICK" >> "$GITHUB_ENV"
       - name: Generate button art
         run: python3 tools/gen_assets.py
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake \
+            -DCMAKE_TOOLCHAIN_FILE=$NDK_PATH/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-28 \
             -DANDROID_STL=c++_shared
