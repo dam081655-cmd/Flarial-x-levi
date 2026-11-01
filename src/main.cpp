@@ -499,4 +499,4 @@ private:
     ll::mod::NativeMod &mSelf;
 };
 
-PL_REGIST
+PL_REGISTER_MOD(FlarialGuiMod, FlarialGuiMod::instance())
