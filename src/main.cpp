@@ -8,7 +8,9 @@
 #include <pl/ModMenu.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <span>
 #include <string>
@@ -25,7 +27,14 @@ constexpr float kScreenW = 2436.0f;
 constexpr float kScreenH = 1080.0f;
 constexpr const char *kModuleId = "flarial_gui.main";
 constexpr const char *kShortcutId = "flarial_gui.shortcut";
+constexpr const char *kButtonId = "flarial_gui.open";
+constexpr int kIconPx = 128;
 constexpr int kShortcutPx = 160;
+// CALIBRATION BUILD: draws a marker ruler + a dot under your finger.
+constexpr bool kDebug = true;
+constexpr const char *kDbgRed = "flarial_gui.dbg_red";
+constexpr const char *kDbgBlue = "flarial_gui.dbg_blue";
+constexpr const char *kDbgGreen = "flarial_gui.dbg_green";
 
 struct Rect {
     float x, y, w, h;
@@ -85,6 +94,96 @@ std::vector<unsigned char> makeShortcutRgba(int n) {
     return px;
 }
 
+
+// ---- tiny PNG writer (stored deflate blocks, no zlib) for the floating-button icon
+uint32_t crc32Of(const unsigned char *d, size_t n) {
+    static uint32_t table[256];
+    static bool init = false;
+    if (!init) {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : (c >> 1);
+            table[i] = c;
+        }
+        init = true;
+    }
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; ++i) crc = table[(crc ^ d[i]) & 0xFF] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+void putBE32(std::vector<unsigned char> &v, uint32_t x) {
+    v.push_back(static_cast<unsigned char>(x >> 24));
+    v.push_back(static_cast<unsigned char>(x >> 16));
+    v.push_back(static_cast<unsigned char>(x >> 8));
+    v.push_back(static_cast<unsigned char>(x));
+}
+
+void pngChunk(std::vector<unsigned char> &out, const char *type, const std::vector<unsigned char> &data) {
+    putBE32(out, static_cast<uint32_t>(data.size()));
+    std::vector<unsigned char> body(type, type + 4);
+    body.insert(body.end(), data.begin(), data.end());
+    out.insert(out.end(), body.begin(), body.end());
+    putBE32(out, crc32Of(body.data(), body.size()));
+}
+
+std::vector<unsigned char> encodePng(const std::vector<unsigned char> &rgba, int w, int h) {
+    std::vector<unsigned char> raw;
+    raw.reserve(static_cast<size_t>(w * 4 + 1) * h);
+    for (int y = 0; y < h; ++y) {
+        raw.push_back(0);
+        raw.insert(raw.end(), rgba.begin() + static_cast<size_t>(y) * w * 4, rgba.begin() + static_cast<size_t>(y + 1) * w * 4);
+    }
+    std::vector<unsigned char> z{0x78, 0x01};
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        size_t n = std::min<size_t>(65535, raw.size() - pos);
+        bool last = (pos + n == raw.size());
+        z.push_back(last ? 1 : 0);
+        z.push_back(static_cast<unsigned char>(n & 0xFF));
+        z.push_back(static_cast<unsigned char>(n >> 8));
+        z.push_back(static_cast<unsigned char>(~n & 0xFF));
+        z.push_back(static_cast<unsigned char>((~n >> 8) & 0xFF));
+        z.insert(z.end(), raw.begin() + pos, raw.begin() + pos + n);
+        pos += n;
+    }
+    uint32_t a = 1, b = 0;
+    for (unsigned char c : raw) { a = (a + c) % 65521u; b = (b + a) % 65521u; }
+    putBE32(z, (b << 16) | a);
+
+    std::vector<unsigned char> png{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    std::vector<unsigned char> ihdr;
+    putBE32(ihdr, static_cast<uint32_t>(w));
+    putBE32(ihdr, static_cast<uint32_t>(h));
+    ihdr.insert(ihdr.end(), {8, 6, 0, 0, 0});
+    pngChunk(png, "IHDR", ihdr);
+    pngChunk(png, "IDAT", z);
+    pngChunk(png, "IEND", {});
+    return png;
+}
+
+// Set the button icon with whatever signature this SDK version has (PNG bytes).
+template <class B>
+decltype(auto) withPngIcon(B &&b, const std::vector<unsigned char> &png) {
+    if constexpr (requires { std::forward<B>(b).pngIcon(std::span<const unsigned char>(png)); }) {
+        return std::forward<B>(b).pngIcon(std::span<const unsigned char>(png));
+    } else if constexpr (requires { std::forward<B>(b).pngIcon(png); }) {
+        return std::forward<B>(b).pngIcon(png);
+    } else if constexpr (requires { std::forward<B>(b).pngIcon(png.data(), png.size()); }) {
+        return std::forward<B>(b).pngIcon(png.data(), png.size());
+    } else {
+        return std::forward<B>(b); // icon API differs: button still works, default icon
+    }
+}
+
+std::vector<unsigned char> makeSolid(int n, unsigned char r, unsigned char g, unsigned char b) {
+    std::vector<unsigned char> px(static_cast<size_t>(n) * n * 4);
+    for (size_t i = 0; i < px.size(); i += 4) {
+        px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255;
+    }
+    return px;
+}
+
 class Gui {
 public:
     static Gui &get() {
@@ -101,6 +200,16 @@ public:
         render();
     }
 
+    // Called by the floating Flarial button: open/close the ClickGUI.
+    void toggle() {
+        using namespace std::chrono;
+        auto now = steady_clock::now();
+        if (duration_cast<milliseconds>(now - mLastToggle).count() < 350) return; // press+release debounce
+        mLastToggle = now;
+        if (!mActive) return;
+        go(mScreen == Screen::Closed ? Screen::Home : Screen::Closed);
+    }
+
     bool onTouch(const pl::input::TouchEvent &e) {
         if (!mActive) return false;
         // Android MotionEvent: 0 down, 1 up, 2 move, 3 cancel, 5/6 pointer down/up
@@ -108,6 +217,11 @@ public:
         const bool isDown = (act == 0 || act == 5);
         const bool isUp = (act == 1 || act == 3 || act == 6);
         const bool isMove = (act == 2);
+
+        if (kDebug && mScreen == Screen::Closed && (isDown || isMove)) {
+            mTouchX = e.x; mTouchY = e.y; mTouchSeen = true;
+            render();
+        }
 
         if (mScreen == Screen::Closed) {
             // Shortcut: tap = open, drag = move. Everything else passes through to the game.
@@ -253,6 +367,15 @@ private:
             switch (mScreen) {
             case Screen::Closed:
                 addId(v, kShortcutId, mSc);
+                if (kDebug) {
+                    // top ruler: one marker every 100 units (blue every 500)
+                    for (int i = 1; i <= 24; ++i)
+                        addId(v, (i % 5 == 0) ? kDbgBlue : kDbgRed, {100.0f * i, 40.0f, 36.0f, 36.0f});
+                    // left ruler: one marker every 100 units downward
+                    for (int j = 1; j <= 10; ++j)
+                        addId(v, (j % 5 == 0) ? kDbgBlue : kDbgRed, {40.0f, 100.0f * j, 36.0f, 36.0f});
+                    if (mTouchSeen) addId(v, kDbgGreen, {mTouchX - 30.0f, mTouchY - 30.0f, 60.0f, 60.0f});
+                }
                 break;
             case Screen::Home:
                 add(v, "dim", {0, 0, kScreenW, kScreenH});
@@ -289,6 +412,9 @@ private:
     Rect mScStart{0, 0, 0, 0};
     Drag mDrag = Drag::None;
     bool mScDrag = false, mScMoved = false;
+    std::chrono::steady_clock::time_point mLastToggle{};
+    bool mTouchSeen = false;
+    float mTouchX = 0, mTouchY = 0;
     float mStartX = 0, mStartY = 0;
     int mPointer = -1;
 };
@@ -321,12 +447,33 @@ public:
                                         kShortcutPx, kShortcutPx))
             getSelf().getLogger().warn("registerImage failed: shortcut");
 
+        if (kDebug) {
+            static const std::vector<unsigned char> red = makeSolid(36, 255, 40, 60);
+            static const std::vector<unsigned char> blue = makeSolid(36, 40, 120, 255);
+            static const std::vector<unsigned char> green = makeSolid(60, 40, 230, 80);
+            pl::modmenu::registerImage(kDbgRed, std::span<const unsigned char>(red.data(), red.size()), 36, 36);
+            pl::modmenu::registerImage(kDbgBlue, std::span<const unsigned char>(blue.data(), blue.size()), 36, 36);
+            pl::modmenu::registerImage(kDbgGreen, std::span<const unsigned char>(green.data(), green.size()), 60, 60);
+        }
+
         bool ok = pl::modmenu::ModuleBuilder(kModuleId, "Flarial GUI")
                       .modId(getSelf().getId())
                       .description("Flarial-style shortcut + ClickGUI (Mods, Cosmetics, HUD editor).")
                       .defaultEnabled(true)
                       .onToggle([](std::string_view, bool enabled) { Gui::get().setActive(enabled); })
                       .registerModule();
+
+        // Floating Flarial button (Levi HUD button) with the round logo as icon.
+        static const std::vector<unsigned char> iconPng = encodePng(makeShortcutRgba(kIconPx), kIconPx, kIconPx);
+        ok = withPngIcon(pl::modmenu::ButtonBuilder(kButtonId, "Flarial")
+                             .modId(getSelf().getId())
+                             .moduleId(kModuleId)
+                             .label("F")
+                             .androidKeyCode(0)
+                             .behavior(pl::modmenu::ButtonBehavior::Click)
+                             .onEvent([](std::string_view, pl::modmenu::ButtonEvent, float) { Gui::get().toggle(); }),
+                         iconPng)
+                 .registerButton() && ok;
 
         // No unregister API for touch callbacks: register once, gate with setActive().
         static bool touchRegistered = false;
@@ -341,6 +488,7 @@ public:
 
     bool disable() {
         Gui::get().setActive(false);
+        pl::modmenu::unregisterButton(kButtonId);
         pl::modmenu::unregisterModule(kModuleId);
         return true;
     }
@@ -351,4 +499,4 @@ private:
     ll::mod::NativeMod &mSelf;
 };
 
-PL_REGISTER_MOD(FlarialGuiMod, FlarialGuiMod::instance())
+PL_REGIST
