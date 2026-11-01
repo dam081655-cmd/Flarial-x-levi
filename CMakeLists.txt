@@ -17,4 +17,4 @@ FetchContent_MakeAvailable(preloader_android)
 
 add_library(flarial_gui SHARED src/main.cpp)
 target_include_directories(flarial_gui PRIVATE src)
-target_link_libraries(flarial_gui PRIVATE preloader)
+target_link_libraries(flarial_gui PRIVATE preloader log)
