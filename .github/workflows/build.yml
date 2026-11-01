@@ -14,28 +14,31 @@ jobs:
           pip install pillow
       - name: Generate button art
         run: python3 tools/gen_assets.py
-      - name: Build with several NDK versions
+      - name: Build test stages (NDK 29, else 28)
         run: |
           NDK_ROOT=/usr/local/lib/android/sdk/ndk
           ls "$NDK_ROOT"
+          NDK=""
+          for v in 29 28; do
+            c=$(ls -d "$NDK_ROOT"/$v.* 2>/dev/null | sort -V | tail -1)
+            if [ -n "$c" ]; then NDK="$c"; break; fi
+          done
+          test -n "$NDK"
+          echo "Using NDK: $NDK"
           mkdir -p dist
-          for v in 28 29 30; do
-            NDK=$(ls -d "$NDK_ROOT"/$v.* 2>/dev/null | sort -V | tail -1)
-            if [ -z "$NDK" ]; then echo "NDK $v not installed, skipping"; continue; fi
-            echo "=== NDK $v: $NDK"
-            cmake -S . -B build_$v -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          for st in 3 5 9; do
+            cmake -S . -B build_s$st -G Ninja -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
               -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
-              -DANDROID_STL=c++_shared || continue
-            cmake --build build_$v --target flarial_gui -j || continue
-            d=dist/flarial_ndk$v
+              -DANDROID_STL=c++_shared -DCMAKE_CXX_FLAGS="-DFG_STAGE=$st"
+            cmake --build build_s$st --target flarial_gui -j
+            d=dist/flarial_s$st
             mkdir -p $d
-            cp build_$v/libflarial_gui.so $d/
-            sed -e "s/Flarial GUI/Flarial NDK$v/" manifest.json > $d/manifest.json
-            (cd $d && zip -r ../flarial_ndk$v.levipack .)
+            cp build_s$st/libflarial_gui.so $d/
+            sed -e "s/Flarial GUI/Flarial S$st/" manifest.json > $d/manifest.json
+            (cd $d && zip -r ../flarial_s$st.levipack .)
           done
           ls dist
-          test -n "$(ls dist/*.levipack 2>/dev/null)"
       - uses: actions/upload-artifact@v4
         with:
           name: flarial_gui
